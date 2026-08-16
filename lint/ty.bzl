@@ -81,58 +81,32 @@ def ty_action(ctx, executable, srcs, transitive_srcs, config, stdout, exit_code 
         else:
             code_search_paths.append(p)
 
-    # Build a script that adds --extra-search-path only for directories that exist
-    # Some pip package directories may not exist, so we check first
-    # Pass --extra-search-path via a @param file, as there might be many of them
-    extra_search_path_script = """PARAM_FILE="$(mktemp)"
-"""
+    # Pass candidate search paths separately so the wrapper can discard paths
+    # that do not exist before passing them to ty.
+    search_path_args = ctx.actions.args()
+    search_path_args.add_all(stub_search_paths + code_search_paths)
+    search_path_args.set_param_file_format("multiline")
+    search_path_args.use_param_file("%s", use_always = True)
 
-    for path in stub_search_paths + code_search_paths:
-        extra_search_path_script += """if [ -d "{path}" ]; then
-  echo "--extra-search-path" >> "$PARAM_FILE"
-  echo "{path}" >> "$PARAM_FILE"
-fi
-""".format(path = path)
+    # ty supports response files. Always use one so the wrapper's command line
+    # stays bounded while File objects remain in a Bazel-managed Args object.
+    action_args.set_param_file_format("multiline")
+    action_args.use_param_file("@%s", use_always = True)
 
-    color_flag = "--color always" if color else "--color never"
-    command = """
-{extra_search_path_script}
-readonly TMP_OUT=$(mktemp)
-
-{ty} check --force-exclude {color_flag} @"$PARAM_FILE" $@ > "$TMP_OUT" 2>&1
-RET=$?
-
-if [ "$RET" -eq 0 ]; then
-    touch {stdout}
-else
-    cp "$TMP_OUT" {stdout}
-fi
-"""
+    wrapper_args = ctx.actions.args()
+    wrapper_args.add(executable)
+    wrapper_args.add(stdout)
+    wrapper_args.add(exit_code if exit_code else "")
+    wrapper_args.add("always" if color else "never")
 
     if exit_code:
         outputs.append(exit_code)
-        command += """
-echo "$RET" > {exit_code}
-"""
-    else:
-        command += """
-if [ "$RET" -ne 0 ]; then
-    cat "$TMP_OUT" >&2
-    exit "$RET"
-fi
-"""
 
-    ctx.actions.run_shell(
+    ctx.actions.run(
         inputs = inputs,
         outputs = outputs,
-        command = command.format(
-            ty = executable.path,
-            stdout = stdout.path,
-            exit_code = exit_code.path if exit_code else "",
-            extra_search_path_script = extra_search_path_script,
-            color_flag = color_flag,
-        ),
-        arguments = [action_args],
+        executable = ctx.executable._ty_wrapper,
+        arguments = [wrapper_args, search_path_args, action_args],
         mnemonic = _MNEMONIC,
         env = env,
         progress_message = "Linting %{label} with ty",
@@ -259,6 +233,11 @@ def lint_ty_aspect(binary, config, rule_kinds = ["py_binary", "py_library", "py_
             "_ty": attr.label(
                 default = binary,
                 allow_files = True,
+                executable = True,
+                cfg = "exec",
+            ),
+            "_ty_wrapper": attr.label(
+                default = Label("@aspect_rules_lint//lint:ty_wrapper"),
                 executable = True,
                 cfg = "exec",
             ),

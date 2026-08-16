@@ -363,3 +363,8 @@ sh_binary(
     name = "cppcheck_wrapper",
     srcs = ["cppcheck_wrapper.bash"],
 )
+
+sh_binary(
+    name = "ty_wrapper",
+    srcs = ["ty_wrapper.bash"],
+)
